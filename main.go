@@ -20,7 +20,7 @@ import (
 type Strategy struct {
 	TargetLatency time.Duration // Ideal request cycle time the PID targets
 	MaxWorkers    int32         // Maximum concurrent fetchers allowed
-	BatchSize     int32         // How many URLs a worker processes per loop iteration
+	BatchSize     int32         // How many URLs a worker grabs at once
 	MinDelay      time.Duration // Base politeness delay between fetches
 	Kp            float64       // Proportional gain for the PID backpressure reflex
 }
@@ -129,7 +129,9 @@ func Evaluate(t *Telemetry, window time.Duration, s Strategy) float64 {
 	bytes := atomic.LoadUint64(&t.BytesRead)
 	total := succ + fail
 
-	if total == 0 { return 0 }
+	if total == 0 {
+		return 0
+	}
 
 	// Throughput metrics: We want raw corpus ingestion volume (MB/sec)
 	mbps := (float64(bytes) / (1024 * 1024)) / window.Seconds()
@@ -150,17 +152,27 @@ func Mutate(s Strategy) Strategy {
 	mutated := s.Clone()
 
 	mutated.TargetLatency += time.Duration(rand.Intn(100)-50) * time.Millisecond
-	if mutated.TargetLatency < 50*time.Millisecond { mutated.TargetLatency = 50 * time.Millisecond }
+	if mutated.TargetLatency < 50*time.Millisecond {
+		mutated.TargetLatency = 50 * time.Millisecond
+	}
 
 	mutated.MaxWorkers += int32(rand.Intn(7) - 3)
-	if mutated.MaxWorkers < 1 { mutated.MaxWorkers = 1 }
-	if mutated.MaxWorkers > 50 { mutated.MaxWorkers = 50 } // Infrastructure safety cap
+	if mutated.MaxWorkers < 1 {
+		mutated.MaxWorkers = 1
+	}
+	if mutated.MaxWorkers > 40 {
+		mutated.MaxWorkers = 40
+	} // Infrastructure safety cap
 
 	mutated.BatchSize += int32(rand.Intn(3) - 1)
-	if mutated.BatchSize < 1 { mutated.BatchSize = 1 }
+	if mutated.BatchSize < 1 {
+		mutated.BatchSize = 1
+	}
 
 	mutated.MinDelay += time.Duration(rand.Intn(20)-10) * time.Millisecond
-	if mutated.MinDelay < 0 { mutated.MinDelay = 0 }
+	if mutated.MinDelay < 0 {
+		mutated.MinDelay = 0
+	}
 
 	return mutated
 }
@@ -169,11 +181,20 @@ func Mutate(s Strategy) Strategy {
 // 4. PARSING & NETWORK ENGINE
 // ============================================================================
 
-var wikiLinkRegex = regexp.MustCompile(`href="/wiki/([^:#"]+)"`)
+var wikiLinkRegex = regexp.MustCompile(`href="/wiki/([^:#\"'<>]+)"`)
 
 func CrawlPage(url string) ([]string, int, error) {
 	client := &http.Client{Timeout: 5 * time.Second}
-	resp, err := client.Get(url)
+
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	// Wikipedia demands a unique User-Agent identifier to prevent blocking
+	req.Header.Set("User-Agent", "GopherConDemoBot/1.0 (contact@example.com) Go-LLM-Project")
+
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -188,7 +209,6 @@ func CrawlPage(url string) ([]string, int, error) {
 		return nil, 0, err
 	}
 
-	// Extract links for next crawler generations
 	matches := wikiLinkRegex.FindAllStringSubmatch(string(bodyBytes), -1)
 	discovered := make([]string, 0)
 	for _, match := range matches {
@@ -201,26 +221,43 @@ func CrawlPage(url string) ([]string, int, error) {
 }
 
 // ============================================================================
-// 5. RUNTIME ORCHESTRATION
+// 5. RUNTIME ORCHESTRATION WITH DETERMINISTIC CONTROL PLANE
 // ============================================================================
 
 func main() {
+	rand.Seed(time.Now().UnixNano())
 	queue := NewURLQueue()
 	telemetry := &Telemetry{}
-	genWindow := 10 * time.Second
+	genWindow := 5 * time.Second
 
-	// Seed links to start the process
+	// Seed links to start the engine
 	queue.Push([]string{
 		"https://en.wikipedia.org/wiki/Artificial_intelligence",
 		"https://en.wikipedia.org/wiki/Go_(programming_language)",
 		"https://en.wikipedia.org/wiki/Control_theory",
 	})
 
+	// BACKGROUND SEEDER: Keeps the queue alive without worker lock contention
+	go func() {
+		for {
+			queue.mu.Lock()
+			qLen := len(queue.links)
+			queue.mu.Unlock()
+
+			if qLen < 5 {
+				queue.Push([]string{
+					fmt.Sprintf("https://en.wikipedia.org/wiki/Special:Random?r=%d", rand.Intn(100000)),
+				})
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+	}()
+
 	currentStrategy := Strategy{
-		TargetLatency: 300 * time.Millisecond,
-		MaxWorkers:    5,
-		BatchSize:     2,
-		MinDelay:      20 * time.Millisecond,
+		TargetLatency: 400 * time.Millisecond,
+		MaxWorkers:    4,
+		BatchSize:     1,
+		MinDelay:      100 * time.Millisecond,
 		Kp:            0.2,
 	}
 
@@ -230,20 +267,27 @@ func main() {
 	}
 
 	var activeWorkers int32 = 0
+	var workerIDSequence int32 = 0
 	var currentBatch int32 = currentStrategy.BatchSize
 	var currentMinDelay int64 = int64(currentStrategy.MinDelay)
 
+	// Fixed Thread-Safe Worker Scaling Mechanism (Token/Sequence Based)
 	adjustWorkers := func(target int32) {
 		for {
 			current := atomic.LoadInt32(&activeWorkers)
-			if current == target { break }
+			if current == target {
+				break
+			}
+
 			if current < target {
+				// Scale Up path
 				if atomic.CompareAndSwapInt32(&activeWorkers, current, current+1) {
-					go func(workerID int) {
+					id := atomic.AddInt32(&workerIDSequence, 1) - 1
+
+					go func(myID int32) {
 						pidThrottle := time.Duration(0)
 						for {
-							if int32(workerID) >= atomic.LoadInt32(&activeWorkers) {
-								atomic.AddInt32(&activeWorkers, -1)
+							if myID >= atomic.LoadInt32(&activeWorkers) {
 								return
 							}
 
@@ -251,11 +295,15 @@ func main() {
 							urls := queue.PopBatch(batchSize)
 
 							if len(urls) == 0 {
-								time.Sleep(200 * time.Millisecond) // Queue starvation cooling
+								time.Sleep(250 * time.Millisecond)
 								continue
 							}
 
 							for _, url := range urls {
+								if myID >= atomic.LoadInt32(&activeWorkers) {
+									return
+								}
+
 								start := time.Now()
 								links, bytes, err := CrawlPage(url)
 								duration := time.Since(start)
@@ -266,12 +314,12 @@ func main() {
 									queue.Push(links)
 								}
 
-								// Execute Tactical Loop Adjustment
 								adjust := pid.Compute(int64(duration))
 								if adjust < 0 {
-									// We are breaking latency thresholds; increase structural pacing delay
 									pidThrottle = time.Duration(math.Abs(adjust)/1e6) * time.Millisecond
-									if pidThrottle > 2*time.Second { pidThrottle = 2 * time.Second }
+									if pidThrottle > 2*time.Second {
+										pidThrottle = 2 * time.Second
+									}
 								} else {
 									pidThrottle = 0
 								}
@@ -280,33 +328,80 @@ func main() {
 								time.Sleep(baseDelay + pidThrottle)
 							}
 						}
-					}(int(current))
+					}(id)
 				}
 			} else {
-				atomic.StoreInt32(&activeWorkers, target)
-				break
+				// Scale Down path via safe limit decrements
+				if atomic.CompareAndSwapInt32(&activeWorkers, current, current-1) {
+					// Surviving workers recognize the new limit and drop out naturally
+				}
 			}
 		}
 	}
 
 	adjustWorkers(currentStrategy.MaxWorkers)
 
-	// ASYNCHRONOUS STRATEGIC SYSTEM MONITOR (The GA)
+	// SYSTEM MONITOR WITH ANNEALED ELITISM PRESERVATION
 	go func() {
+		recoveryMode := false
+		var bestScore float64 = 0.0
+		var bestStrategy Strategy = currentStrategy.Clone()
+
 		for {
 			time.Sleep(genWindow)
 
 			score := Evaluate(telemetry, genWindow, currentStrategy)
 			succ := atomic.LoadUint64(&telemetry.Successes)
+			fail := atomic.LoadUint64(&telemetry.Failures)
 			bytes := atomic.LoadUint64(&telemetry.BytesRead)
 
-			fmt.Printf("\n[GA GEN EVAL] Fitness Score: %6.2f | Ingested: %.2f MB | Requests: %d | Workers: %d\n",
-				score, float64(bytes)/(1024*1024), succ, currentStrategy.MaxWorkers)
+			fmt.Printf("\n[GA GEN EVAL] Fitness: %6.2f | Ingested: %.2f MB | Success: %d | Fail: %d | Workers: %d\n",
+				score, float64(bytes)/(1024*1024), succ, fail, atomic.LoadInt32(&activeWorkers))
 
-			// Simple evolutionary transition strategy
-			nextStrategy := Mutate(currentStrategy)
+			total := succ + fail
+			var nextStrategy Strategy
 
-			// Dynamic hot swap
+			// Elitism selection check
+			if score > bestScore && fail == 0 && total > 0 {
+				bestScore = score
+				bestStrategy = currentStrategy.Clone()
+				fmt.Printf("<!> NEW ELITE STRATEGY RECORDED: Score %.2f\n", score)
+			}
+
+			if total > 0 && float64(fail)/float64(total) > 0.50 {
+				fmt.Println("<!> EMERGENCY: High failure rate detected. Scaling pool down to safety baseline.")
+				nextStrategy = currentStrategy.Clone()
+				nextStrategy.MaxWorkers = 1
+				nextStrategy.BatchSize = 1
+				nextStrategy.MinDelay = 2 * time.Second
+				recoveryMode = true
+			} else if total == 0 {
+				fmt.Println("<!> WAITING: Queue starvation or network block. Maintaining baseline probing structure.")
+				nextStrategy = currentStrategy.Clone()
+				nextStrategy.MaxWorkers = 3
+				nextStrategy.BatchSize = 1
+			} else if recoveryMode {
+				fmt.Println("<!> RECOVERY: System stable. Cautiously probing network by adding a worker.")
+				nextStrategy = bestStrategy.Clone() // Pull structural attributes back from elite configuration
+				nextStrategy.MaxWorkers = atomic.LoadInt32(&activeWorkers) + 1
+				nextStrategy.MinDelay -= 200 * time.Millisecond
+				if nextStrategy.MinDelay < 50*time.Millisecond {
+					nextStrategy.MinDelay = 50 * time.Millisecond
+				}
+
+				if nextStrategy.MaxWorkers >= 4 {
+					recoveryMode = false
+					fmt.Println("<!> NORMAL OPS: Re-entering normal Darwinian exploration.")
+				}
+			} else {
+				// Exploitation vs Exploration roll
+				if rand.Float64() < 0.75 {
+					nextStrategy = Mutate(bestStrategy) // Mutate from champion lineage
+				} else {
+					nextStrategy = bestStrategy.Clone() // Exploit champion exactly to maintain stable baseline
+				}
+			}
+
 			currentStrategy = nextStrategy
 			atomic.StoreInt32(&currentBatch, currentStrategy.BatchSize)
 			atomic.StoreInt64(&currentMinDelay, int64(currentStrategy.MinDelay))
