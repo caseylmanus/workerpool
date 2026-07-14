@@ -1,13 +1,51 @@
-Darwinian Concurrency
-Autonomic Control Loops & Genetic Optimization in Go
-9 Jul 2026
+# A Worker Pool using Darwinian Concurrency
 
-Casey Lmanus
-Software Engineer
-casey@example.com
+Autonomic Control Loops & Genetic Optimization in Go
+
+Gophercon 2026
+
+Casey Manus
+Principal Software Engineer - Bayer Crop Science
+caseylmanus@gmail.com
+casey.manus@bayer.com
 https://github.com/caseylmanus/workerpool
 
-* The Problem with Static Tuning
+
+## Introduction to Genetic Algorithms
+Gophercon 2023 Overview
+
+Genetic Algorithms (GAs) are a powerful tool used to find **approximate solutions to difficult-to-solve problems**. They achieve this by applying the principles of **evolutionary biology to computer science**, specifically by **mimicking the biological process of natural selection**.
+
+The core problem-solving process of a GA involves several key steps:
+*   **Define Genome**: This establishes the dataset that describes your problem, composed of individual genes.
+*   **Random Population**: The algorithm starts with a set of these genomes.
+*   **Determine Fitness**: A fitness function "grades" each genome to assess its suitability for continued evolution.
+*   **Next Population / Generation**: Each cycle creates a new "generation" of solutions.
+*   **Selection**: Members are chosen from the current population to contribute to the next generation.
+
+## GA Evolution: From Selection to Solution
+
+The evolution within a genetic algorithm relies on mechanisms inspired by natural biology:
+*   **Selection**: This is the process of choosing population members to "cross over" into the next generation. Different types of selection exist, such as Roulette Wheel (random), Weighted Roulette Wheel, or Fittest Only, ensuring that individuals with higher fitness are more likely to pass on their genetic material.
+*   **Cross Over**: After selection, "candidate offspring" are produced by taking two "parents," combining their characteristics, and then mutating them. Examples include Single Point Cross Over and Uniform Cross Over.**Genomes** with higher fitness are more likely to pass on their genetic material.
+*   **Cross Over**: After selection, "candidate offspring" are produced by taking two "parents," combining their characteristics, and then mutating them. Examples include Single Point Cross Over and Uniform Cross Over.
+*   **Mutation**: This introduces random changes into the offspring, which is crucial for maintaining genetic diversity and exploring new solution spaces.
+
+## Key concepts foundational to evolution:
+*   **Genome**: The problem's dataset, where individual genes represent data points or behaviors.
+*   **Population**: A collection of genomes, which can sometimes start as multiple random populations, creating "species" that compete for optimal attributes.
+*   **Fitness Function**: Assigns a "grade" to a genome, determining its "fitness for continued evolution".
+*   **Evolution**: The continuous refinement process where the "best members of the population get selected to crossover into the next" new "generation".
+
+Genetic algorithms are excellent tools for **optimization of data as inputs to other processes**. Their applications span various fields, such as optimizing flight paths for spot spraying and rainfall prediction in agriculture, or training Neural Networks and Genetic Programs.
+
+
+## The Example Problem
+- We want to train an LLM on all data from Wikipedia
+- Wikipedia has constrained output, and rate limiting to prevent scraping
+- We want to build a workerpool that adapts to upstream responses
+
+## The Problem with Static Tuning
 Most concurrent architectures use hardcoded worker limits and sleep cycles.
 - Fine-tuned for local machine networks.
 - Fractures instantly when exposed to changing upstream rate limits.
@@ -15,14 +53,31 @@ Most concurrent architectures use hardcoded worker limits and sleep cycles.
 
 We built an autonomous crawler that dynamically matches the environment's pressure.
 
-* The Three Pillars of Autonomic Control
+## Transitioning Genetic Algorithms to Real-Time Control Theory
+- Traditionally Fitness will increase with evolution given static environment and objective fitness functions
+- Environment Pressure and Dynamic Baselines means optimal fitness is a changing target
+
+
+## Understanding PID Controllers
+A PID controller is a control loop feedback mechanism that automatically corrects errors in mechanical systems.
+
+It continuously calculates an **error value** as the difference between a desired setpoint and a measured process variable.
+
+The controller applies three terms to eliminate this error:
+* **Proportional (P)**: Corrects for the **present** error.
+* **Integral (I)**: Corrects for the accumulation of **past** errors.
+* **Derivative (D)**: Predicts **future** errors based on the current rate of change.
+
+Common uses include automobile **cruise control** and drone **flight stabilization**.
+
+## The Three Pillars of Autonomic Control
 To achieve absolute resilience, we merged three distinct engineering layers:
 
 1. **The Execution Layer:** A decoupled Go worker pool with token-based thread lifecycles.
 2. **The Reactive Layer (PID):** Microsecond backpressure reflexes to handle momentary network spikes.
 3. **The Strategic Layer (GA):** A macro genetic loop managing structural DNA and system strategy.
 
-* System Topology Architecture
+## System Topology Architecture
 
     +-----------------------------------------------------------+
     |                     Strategic Layer (GA)                  |
@@ -39,13 +94,13 @@ To achieve absolute resilience, we merged three distinct engineering layers:
     |      Decoupled Workers Fetching Text from Wikipedia       |
     +-----------------------------------------------------------+
 
-* Pillar 1: Thread Lifecycle Control Plane
+## Pillar 1: Thread Lifecycle Control Plane
 To adjust scale smoothly without resource leaks, we use atomic Compare-and-Swap operations.
 Workers are assigned an immutable ID. If the target pool size shrinks below their ID, they drop out naturally.
 
 No negative counts, no orphaned threads, and zero mutex contention during structural shifts.
 
-* Control Plane Deployment Strategy
+## Control Plane Deployment Strategy
     // Inside our adjustWorkers loop
     if current < target {
         if atomic.CompareAndSwapInt32(&activeWorkers, current, current+1) {
@@ -59,7 +114,7 @@ No negative counts, no orphaned threads, and zero mutex contention during struct
         }
     }
 
-* Pillar 2: The PID Backpressure Reflex
+## Pillar 2: The PID Backpressure Reflex
 The Proportional-Integral-Derivative (PID) controller is modeled after mechanical governors.
 - It samples the actual HTTP latency of the last request.
 - Compares it against the genome's current `TargetLatency`.
@@ -67,28 +122,27 @@ The Proportional-Integral-Derivative (PID) controller is modeled after mechanica
 
 This prevents the crawler from overwhelming the server before the next evaluation generation arrives.
 
-* Pillar 3: Elitist Genetic Algorithm
+## Pillar 3: Elitist Genetic Algorithm
 Every 5 seconds, the system reviews its performance via an evaluation window:
 
-.code -numbers main.go /^func Evaluate/,/^}/
+If a configuration yields exceptional throughput without triggering network failures, 
+it is crowned the **Elite Strategy**.
 
-If a configuration yields exceptional throughput without triggering network failures, it is crowned the **Elite Strategy**. 
-
-* Handling Environmental Disruption
+## Handling Environmental Disruption
 The system does not rely entirely on random mutation. It implements hard deterministic survival overrides:
 
 - **Panic / Scale to Zero:** If failures climb past 50%, the pool instantly collapses to 1 worker fetching at a highly restricted delay.
 - **Starvation Protection:** If requests drop to 0, it expands the pool out of a freeze safely without ruining the genetic lineage coefficients.
 - **Recovery Mode:** Once stable, it uses the Elite configuration blueprint to step back up one worker at a time until normal operations resume.
 
-* The Telemetry Observability Dashboard
+## The Telemetry Observability Dashboard
 To watch the engine track equilibrium, we bound our atomic metrics plane to a thread-safe UI loop.
 
 - Updates every 200ms using lockless reads.
 - Visualizes active worker pools, target latencies, and system states.
 - Shows the audience the exact moment the engine stabilizes against Wikipedia's protective defenses.
 
-* Key Takeaways for the GopherCon Stage
+## Key Takeaways for the GopherCon Stage
 - **Combine Mechanisms:** Use deterministic controls for emergencies, but heuristic mutations for peace times.
 - **Decouple Tracking:** Keep queue replenishment separate from worker routines to avoid lock contention.
 - **Isolate State:** Use lockless atomic variables for your core data planes to ensure metrics collection never slows down execution.
