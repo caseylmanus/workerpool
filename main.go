@@ -395,7 +395,7 @@ func main() {
 			container.NewHBox(widget.NewLabel("Total Text Corpus Extracted:"), lblTotalIngested),
 			widget.NewLabel("Pool Execution Reliability Score:"),
 			progressReliability,
-			container.NewHBox(widget.NewLabel("Successful Page Ingestions:"), lblSuccessCount),
+			container.NewHBox(widget.NewLabel("Generation Page Ingestions:"), lblSuccessCount),
 			container.NewHBox(widget.NewLabel("Dropped Requests / Limits:  "), lblFailureCount),
 		),
 	)
@@ -410,31 +410,32 @@ func main() {
 	go func() {
 		for {
 			time.Sleep(200 * time.Millisecond)
+			fyne.Do(func() {
+				// Refresh UI Strategy Variables
+				lblWorkers.SetText(fmt.Sprintf("%d Goroutines", atomic.LoadInt32(&activeWorkers)))
+				lblLatency.SetText(fmt.Sprintf("%v", time.Duration(atomic.LoadInt64(&pid.setpoint))))
+				lblBatch.SetText(fmt.Sprintf("%d URLs", atomic.LoadInt32(&currentBatch)))
+				lblDelay.SetText(fmt.Sprintf("%v", time.Duration(atomic.LoadInt64(&currentMinDelay))))
+				lblKp.SetText(fmt.Sprintf("%.3f", math.Float64frombits(atomic.LoadUint64(&pid.kp))))
+				lblMode.SetText(uiMode)
 
-			// Refresh UI Strategy Variables
-			lblWorkers.SetText(fmt.Sprintf("%d Goroutines", atomic.LoadInt32(&activeWorkers)))
-			lblLatency.SetText(fmt.Sprintf("%v", time.Duration(atomic.LoadInt64(&pid.setpoint))))
-			lblBatch.SetText(fmt.Sprintf("%d URLs", atomic.LoadInt32(&currentBatch)))
-			lblDelay.SetText(fmt.Sprintf("%v", time.Duration(atomic.LoadInt64(&currentMinDelay))))
-			lblKp.SetText(fmt.Sprintf("%.3f", math.Float64frombits(atomic.LoadUint64(&pid.kp))))
-			lblMode.SetText(uiMode)
+				// Process Cumulative MB from clean thread-safe bytes tally
+				rawBytes := atomic.LoadUint64(&telemetry.CumulativeBytes)
+				mb := float64(rawBytes) / (1024 * 1024)
+				lblTotalIngested.SetText(fmt.Sprintf("%.2f MB", mb))
 
-			// Process Cumulative MB from clean thread-safe bytes tally
-			rawBytes := atomic.LoadUint64(&telemetry.CumulativeBytes)
-			mb := float64(rawBytes) / (1024 * 1024)
-			lblTotalIngested.SetText(fmt.Sprintf("%.2f MB", mb))
+				succ := atomic.LoadUint64(&telemetry.Successes)
+				fail := atomic.LoadUint64(&telemetry.Failures)
+				lblSuccessCount.SetText(fmt.Sprintf("%d", succ))
+				lblFailureCount.SetText(fmt.Sprintf("%d", fail))
 
-			succ := atomic.LoadUint64(&telemetry.Successes)
-			fail := atomic.LoadUint64(&telemetry.Failures)
-			lblSuccessCount.SetText(fmt.Sprintf("%d", succ))
-			lblFailureCount.SetText(fmt.Sprintf("%d", fail))
-
-			total := succ + fail
-			if total > 0 {
-				progressReliability.SetValue(float64(succ) / float64(total))
-			} else {
-				progressReliability.SetValue(1.0)
-			}
+				total := succ + fail
+				if total > 0 {
+					progressReliability.SetValue(float64(succ) / float64(total))
+				} else {
+					progressReliability.SetValue(1.0)
+				}
+			})
 		}
 	}()
 
