@@ -113,7 +113,7 @@ func (ui *UI) refresh() {
 	ui.lblBatch.SetText(fmt.Sprintf("%d URLs", atomic.LoadInt32(&ui.Engine.CurrentBatch)))
 	ui.lblDelay.SetText(fmt.Sprintf("%v", time.Duration(atomic.LoadInt64(&ui.Engine.CurrentMinDelay))))
 	ui.lblKp.SetText(fmt.Sprintf("%.3f", math.Float64frombits(atomic.LoadUint64(&ui.Engine.PID.Kp))))
-	ui.lblMode.SetText(ui.Engine.UIMode)
+	ui.lblMode.SetText(ui.Engine.GetUIMode())
 
 	// Process Cumulative MB from clean thread-safe bytes tally
 	rawBytes := atomic.LoadUint64(&ui.Engine.Telemetry.CumulativeBytes)

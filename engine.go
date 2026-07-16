@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"math/rand"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -13,6 +14,7 @@ type Engine struct {
 	Queue           *URLQueue
 	Telemetry       *Telemetry
 	PID             *AtomicPID
+	mu              sync.RWMutex
 	CurrentStrategy Strategy
 
 	ActiveWorkers    int32
@@ -45,6 +47,27 @@ func NewEngine() *Engine {
 	}
 }
 
+// GetStrategy returns a copy of the current strategy.
+func (e *Engine) GetStrategy() Strategy {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.CurrentStrategy
+}
+
+// GetUIMode returns the current UI mode string.
+func (e *Engine) GetUIMode() string {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.UIMode
+}
+
+// SetUIMode updates the UI mode string.
+func (e *Engine) SetUIMode(mode string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.UIMode = mode
+}
+
 // Start begins the background processes for the engine.
 func (e *Engine) Start() {
 	e.Queue.Push([]string{
@@ -54,7 +77,7 @@ func (e *Engine) Start() {
 	})
 
 	go e.seederLoop()
-	e.AdjustWorkers(e.CurrentStrategy.MaxWorkers)
+	e.AdjustWorkers(e.GetStrategy().MaxWorkers)
 	go e.evolutionLoop()
 }
 
@@ -137,12 +160,13 @@ func (e *Engine) computePIDThrottle(duration time.Duration) time.Duration {
 func (e *Engine) evolutionLoop() {
 	recoveryMode := false
 	bestScore := 0.0
-	bestStrategy := e.CurrentStrategy.Clone()
-	e.UIMode = "DARWINIAN SEARCH"
+	bestStrategy := e.GetStrategy().Clone()
+	e.SetUIMode("DARWINIAN SEARCH")
 
 	for {
 		time.Sleep(e.GenWindow)
-		score := Evaluate(e.Telemetry, e.GenWindow, e.CurrentStrategy)
+		strategy := e.GetStrategy()
+		score := Evaluate(e.Telemetry, e.GenWindow, strategy)
 		succ := atomic.LoadUint64(&e.Telemetry.Successes)
 		fail := atomic.LoadUint64(&e.Telemetry.Failures)
 		total := succ + fail
@@ -150,7 +174,7 @@ func (e *Engine) evolutionLoop() {
 		// Elitism check
 		if score > bestScore && fail == 0 && total > 0 {
 			bestScore = score
-			bestStrategy = e.CurrentStrategy.Clone()
+			bestStrategy = strategy.Clone()
 		}
 
 		var nextStrategy Strategy
@@ -162,9 +186,10 @@ func (e *Engine) evolutionLoop() {
 }
 
 func (e *Engine) selectNextStrategy(total, fail uint64, recoveryMode bool, bestStrategy Strategy) (Strategy, bool) {
+	strategy := e.GetStrategy()
 	if total > 0 && float64(fail)/float64(total) > 0.50 {
-		e.UIMode = "PANIC / SCALE BACK"
-		nextStrategy := e.CurrentStrategy.Clone()
+		e.SetUIMode("PANIC / SCALE BACK")
+		nextStrategy := strategy.Clone()
 		nextStrategy.MaxWorkers = 1
 		nextStrategy.BatchSize = 1
 		nextStrategy.MinDelay = 2 * time.Second
@@ -172,14 +197,14 @@ func (e *Engine) selectNextStrategy(total, fail uint64, recoveryMode bool, bestS
 	}
 
 	if total == 0 {
-		e.UIMode = "QUEUE STARVATION"
-		nextStrategy := e.CurrentStrategy.Clone()
+		e.SetUIMode("QUEUE STARVATION")
+		nextStrategy := strategy.Clone()
 		nextStrategy.MaxWorkers = 2
 		return nextStrategy, recoveryMode
 	}
 
 	if recoveryMode {
-		e.UIMode = "RECOVERY PROBE"
+		e.SetUIMode("RECOVERY PROBE")
 		nextStrategy := bestStrategy.Clone()
 		nextStrategy.MaxWorkers = atomic.LoadInt32(&e.ActiveWorkers) + 1
 		if nextStrategy.MaxWorkers >= 4 {
@@ -188,7 +213,7 @@ func (e *Engine) selectNextStrategy(total, fail uint64, recoveryMode bool, bestS
 		return nextStrategy, true
 	}
 
-	e.UIMode = "DARWINIAN SEARCH"
+	e.SetUIMode("DARWINIAN SEARCH")
 	if rand.Float64() < 0.75 {
 		return Mutate(bestStrategy), false
 	}
@@ -196,10 +221,13 @@ func (e *Engine) selectNextStrategy(total, fail uint64, recoveryMode bool, bestS
 }
 
 func (e *Engine) updateStrategy(s Strategy) {
+	e.mu.Lock()
 	e.CurrentStrategy = s
-	atomic.StoreInt32(&e.CurrentBatch, e.CurrentStrategy.BatchSize)
-	atomic.StoreInt64(&e.CurrentMinDelay, int64(e.CurrentStrategy.MinDelay))
-	atomic.StoreInt64(&e.PID.Setpoint, int64(e.CurrentStrategy.TargetLatency))
-	atomic.StoreUint64(&e.PID.Kp, math.Float64bits(e.CurrentStrategy.Kp))
-	e.AdjustWorkers(e.CurrentStrategy.MaxWorkers)
+	e.mu.Unlock()
+	atomic.StoreInt32(&e.CurrentBatch, s.BatchSize)
+	atomic.StoreInt64(&e.CurrentMinDelay, int64(s.MinDelay))
+	atomic.StoreInt64(&e.PID.Setpoint, int64(s.TargetLatency))
+	atomic.StoreUint64(&e.PID.Kp, math.Float64bits(s.Kp))
+	e.AdjustWorkers(s.MaxWorkers)
 }
+
